@@ -1,0 +1,10 @@
+.env
+venv/
+__pycache__/
+data/chroma_db/
+data/users.json
+data/tenants.json
+data/jobs.json
+uploads/
+*.pyc
+.DS_Store
