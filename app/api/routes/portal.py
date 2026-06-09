@@ -299,6 +299,7 @@ async def admin_portal(tenant_id: str):
       </div>
     `).join('');
   }}
+  
 
   // File selection
   document.getElementById('fileInput').addEventListener('change', function() {{
@@ -347,22 +348,35 @@ async def admin_portal(tenant_id: str):
       if (res.ok) {{
         const result = document.getElementById('result');
         result.className = 'result success';
+
+        // Handle both sync and async (background job) responses
+        const filename = data.filename || selectedFile.name;
+        const pages = data.pages_processed ?? '(processing...)';
+        const chunks = data.chunks_created ?? '(processing...)';
+        const jobId = data.job_id;
+
         result.innerHTML = `
-          ✅ <strong>${{data.filename}}</strong> uploaded successfully!<br>
-          ${{data.pages_processed}} pages · ${{data.chunks_created}} chunks stored
+          ✅ <strong>${{filename}}</strong> uploaded successfully!<br>
+          ${{pages}} pages · ${{chunks}} chunks stored
+          ${{jobId ? `<br><small>Job ID: ${{jobId}} — chunks will appear shortly</small>` : ''}}
         `;
         result.style.display = 'block';
 
-        // Save to history
         uploadHistory.push({{
-          filename: data.filename,
-          pages: data.pages_processed,
-          chunks: data.chunks_created,
+          filename: filename,
+          pages: pages,
+          chunks: chunks,
           time: new Date().toLocaleString(),
         }});
         localStorage.setItem('uploads_' + tenantId, JSON.stringify(uploadHistory));
         renderHistory();
-        loadStats();
+        
+        // Poll for job completion if background processing
+        if (jobId) {{
+          pollJobStatus(jobId);
+        }} else {{
+          loadStats();
+        }}
       }} else {{
         showError(data.detail || 'Upload failed');
       }}
@@ -382,6 +396,41 @@ async def admin_portal(tenant_id: str):
     result.className = 'result error';
     result.innerHTML = '❌ ' + msg;
     result.style.display = 'block';
+  }}
+    // Poll background job status
+  async function pollJobStatus(jobId) {{
+    const maxAttempts = 20;
+    let attempts = 0;
+
+    const interval = setInterval(async () => {{
+      attempts++;
+
+      try {{
+        const res = await fetch(`/api/v1/jobs/${{jobId}}`);
+        const job = await res.json();
+
+        if (job.status === 'completed') {{
+          clearInterval(interval);
+
+          loadStats();
+
+          document.getElementById('result').innerHTML +=
+            `<br>✅ Processing complete: ${{job.result.pages_processed}} pages · ${{job.result.chunks_created}} chunks`;
+        }}
+        else if (job.status === 'failed') {{
+          clearInterval(interval);
+          showError('Processing failed: ' + job.error);
+        }}
+      }}
+      catch (e) {{
+        clearInterval(interval);
+        console.error(e);
+      }}
+
+      if (attempts >= maxAttempts) {{
+        clearInterval(interval);
+      }}
+    }}, 3000); // check every 3 seconds
   }}
 
   // Init
