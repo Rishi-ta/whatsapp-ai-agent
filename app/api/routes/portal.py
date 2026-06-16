@@ -13,6 +13,7 @@ async def admin_portal(tenant_id: str):
     No login required for Week 3 — Week 4 adds auth.
     """
     tenant = tenant_service.get_tenant(tenant_id)
+    keyword = tenant.get("keyword", tenant_id.upper())
 
     if not tenant:
         return HTMLResponse(
@@ -226,6 +227,19 @@ async def admin_portal(tenant_id: str):
       <span class="stat-label">Chunks Stored</span>
       <span class="stat-value" id="chunkCount">Loading...</span>
     </div>
+    <h2>Share With Customers</h2>
+      <p style="font-size:14px; color:#555; margin-bottom:14px">
+        Anyone can connect to your bot by clicking this link or sending the keyword on WhatsApp.
+      </p>
+      <a href="https://wa.me/14155238886?text=menu%20{tenant.get('keyword', tenant_id.upper())}"
+        target="_blank"
+        style="display:block; background:#25d366; color:white; text-align:center;
+                padding:14px; border-radius:8px; text-decoration:none; font-weight:600;">
+        💬 Chat on WhatsApp
+      </a>
+      <p style="font-size:13px; color:#888; margin-top:10px; text-align:center">
+        Keyword: <strong>{tenant.get('keyword', tenant_id.upper())}</strong>
+      </p>
   </div>
 
   <!-- Upload -->

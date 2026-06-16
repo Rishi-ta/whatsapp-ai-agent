@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel
 from pathlib import Path
-
+from typing import Optional
 from app.services.tenant_service import TenantService
 from app.services.pdf_service import PDFService
 from app.services.chunking_service import ChunkingService
@@ -26,6 +26,8 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 class CreateTenantRequest(BaseModel):
     tenant_id: str
     name: str
+    keyword: Optional[str] = None  # auto-generated if not provided
+
 
 
 class RegisterPhoneRequest(BaseModel):
@@ -35,8 +37,19 @@ class RegisterPhoneRequest(BaseModel):
 @router.post("/tenants")
 async def create_tenant(request: CreateTenantRequest):
     try:
-        tenant = tenant_service.create_tenant(request.tenant_id, request.name)
-        return {"message": "Tenant created", "tenant": tenant}
+        tenant = tenant_service.create_tenant(
+            request.tenant_id,
+            request.name,
+            keyword=request.keyword,
+        )
+        return {
+            "message": "Tenant created",
+            "tenant": tenant,
+            "whatsapp_instructions": (
+                f"Customers should message 'menu {tenant['keyword']}' "
+                f"to +14155238886 on WhatsApp"
+            ),
+        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

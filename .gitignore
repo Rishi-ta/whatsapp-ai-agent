@@ -8,3 +8,5 @@ data/jobs.json
 uploads/
 *.pyc
 .DS_Store
+*.log
+*.pdf

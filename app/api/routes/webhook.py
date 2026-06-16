@@ -1,35 +1,31 @@
 import logging
-from fastapi import APIRouter, Form, Response
+import re
+from fastapi import APIRouter, Form, Response, Request
 from twilio.twiml.messaging_response import MessagingResponse
-from functools import lru_cache
-from datetime import datetime, timedelta
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.services.rag_service import RAGService
 from app.services.conversation_service import ConversationService
 from app.services.tenant_service import TenantService
 from app.core.config import get_settings
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-from fastapi import Request
-
-limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 settings = get_settings()
+limiter = Limiter(key_func=get_remote_address)
 
 conversation_service = ConversationService(max_history=10)
 tenant_service = TenantService()
 
-# Simple rate limiting: track last request per phone
-_last_request = {}
-RATE_LIMIT_SECONDS = 2  # Minimum 2 seconds between requests per user
+# Matches messages like: "menu RESTAURANT123" or "MENU restaurant123"
+KEYWORD_PATTERN = re.compile(r"^(menu|join|connect)\s+([a-zA-Z0-9]+)$", re.IGNORECASE)
 
 
 @router.post("/webhook")
 @limiter.limit("30/minute")
 async def whatsapp_webhook(
-    request: Request,          # add this first
+    request: Request,
     From: str = Form(...),
     Body: str = Form(...),
 ):
@@ -38,55 +34,54 @@ async def whatsapp_webhook(
 
     logger.info(f"Message from {phone}: {message[:80]}")
 
-    # Rate limiting
-    now = datetime.now()
-    if phone in _last_request:
-        last_time = _last_request[phone]
-        if (now - last_time).total_seconds() < RATE_LIMIT_SECONDS:
-            return _twiml_reply("Please wait a moment before sending another message.")
-    
-    _last_request[phone] = now
-
     # Reset command
     if message.lower() in ("reset", "clear", "start over"):
         conversation_service.clear(phone)
         return _twiml_reply("Conversation reset. Ask me anything!")
 
-    # Look up which tenant this phone number belongs to
+    # Check if this phone is already linked to a tenant
     tenant_id = tenant_service.get_tenant_by_phone(phone)
 
     if not tenant_id:
-        # Phone not registered to any tenant yet
+        # Not linked yet — check if this message is a keyword command
+        match = KEYWORD_PATTERN.match(message)
+
+        if match:
+            keyword = match.group(2)
+            found_tenant_id = tenant_service.get_tenant_by_keyword(keyword)
+
+            if found_tenant_id:
+                tenant_service.register_phone(found_tenant_id, phone)
+                tenant = tenant_service.get_tenant(found_tenant_id)
+                return _twiml_reply(
+                    f"Connected to {tenant['name']}! 🎉\n\n"
+                    f"Ask me anything about their products, services, or FAQs."
+                )
+            else:
+                return _twiml_reply(
+                    f"Sorry, I couldn't find a business with code '{keyword}'. "
+                    f"Please check the code and try again."
+                )
+
+        # Not linked, not a keyword command — show instructions
         return _twiml_reply(
-            "Welcome! You're not connected to any business yet. "
-            "Please contact your service provider to activate this bot."
+            "👋 Welcome! To get started, send:\n\n"
+            "menu <BUSINESS_CODE>\n\n"
+            "Use the code provided by the business you want to chat with."
         )
 
-    # Get this tenant's ChromaDB collection
+    # Phone is linked — proceed with normal RAG flow
     collection_name = tenant_service.get_collection_name(tenant_id)
-
-    # Build question with conversation history
     history = conversation_service.get_history(phone)
     enriched_question = _build_question_with_history(message, history)
 
     try:
         rag_service = RAGService(collection_name=collection_name)
-        answer, source_chunks = rag_service.answer(
-            question=enriched_question,
-            top_k=3,
-        )
+        answer, source_chunks = rag_service.answer(enriched_question, top_k=3)
         reply = _format_whatsapp_reply(answer, source_chunks)
-
     except Exception as e:
-        error_msg = str(e)
-        
-        # Handle quota exceeded error
-        if "429" in error_msg or "quota" in error_msg.lower():
-            logger.warning(f"Gemini quota exceeded for tenant {tenant_id}")
-            reply = "I've reached my daily request limit. Please try again tomorrow. 🔄"
-        else:
-            logger.error(f"RAG error for tenant {tenant_id}: {error_msg}", exc_info=True)
-            reply = "Sorry, I ran into an issue. Please try again."
+        logger.error(f"RAG error for tenant {tenant_id}: {e}")
+        reply = "Sorry, I ran into an issue. Please try again."
 
     conversation_service.add_message(phone, "user", message)
     conversation_service.add_message(phone, "assistant", reply)
