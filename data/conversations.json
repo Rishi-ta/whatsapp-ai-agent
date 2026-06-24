@@ -1,0 +1,28 @@
+{
+  "whatsapp:+917061913428": [
+    {
+      "role": "user",
+      "content": "what you know"
+    },
+    {
+      "role": "assistant",
+      "content": "Based on the provided documents:\n\n*   **Hotel Booking Information (Page 0)**:\n    *   Booking ID: GH71214270713910\n    *   PNR: 0178804934\n    *   Hotel: Hotel Fortune, Ayodhya, located at 0, Station Road, Kori Mandir, Jalwana Pura, Ayodhya, 224123.\n    *   Contact: 9235001181, hotelfortune2025@gmail.com\n    *   Booked on: 07 Jun 2026\n    *   Stay: 1 Night Stay\n    *   Check-in: Wed, 10 Jun 2026, after 12:00 PM\n    *   Check-out: Thu, 11 Jun 2026, before 11:00 AM\n    *   Guests: 5 (Govind Jha +4)\n    *   Rooms: 2 Deluxe Rooms, Room Only, 1 King Bed each. Extra beds are not supported in this room category.\n    *   Paid Amount: INR 4650\n    *   Saved Amount: INR 1382\n    *   Cancellation Policy: Free Cancellation till 08 Jun 2026 11:59 AM.\n\n*   **General Hotel Policies & Information (Page 0)**:\n    *   For early check-in, extra bed, and airport pickups, contact the hotel directly.\n    *   Accepted ID proofs: Passport, Aadhaar, and Driving License. Local IDs are allowed.\n    *   To obtain a GST invoice for properties in India, ask at check-in and collect at check-out.\n    *   Mytrips (Modify booking instantly) can be reached at (0124) 628-0407.\n\n*   **Restaurant Description (Page 0)**:\n    *   \"THE OLD OAK\" is a dining experience focused on family, fun, and memorable moments.\n    *   It overlooks award-winning golf courses and pays tribute to a grand oak tree.\n    *   It symbolizes the Club's offerings, history, tradition, values, service, and provides something for everyone...."
+    },
+    {
+      "role": "user",
+      "content": "good suggest me something good"
+    },
+    {
+      "role": "assistant",
+      "content": "I cannot suggest \"something good\" as the provided documents only contain factual information about a hotel booking and a restaurant description, not general recommendations or suggestions.\n\n_(Source: page 1)_"
+    },
+    {
+      "role": "user",
+      "content": "??"
+    },
+    {
+      "role": "assistant",
+      "content": "Your question is unclear. Please provide a complete question.\n\n_(Source: page 1)_"
+    }
+  ]
+}
