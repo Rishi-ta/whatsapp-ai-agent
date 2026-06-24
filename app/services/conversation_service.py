@@ -1,35 +1,41 @@
-from collections import defaultdict
+import json
+import logging
+from pathlib import Path
 from typing import List, Dict
+
+logger = logging.getLogger(__name__)
+HISTORY_FILE = Path("data/conversations.json")
 
 
 class ConversationService:
-    """
-    Stores conversation history per phone number, in memory.
-    Each phone number gets its own list of message dicts.
-
-    Week 2 uses in-memory storage — good enough for testing.
-    Week 3 will move this to a database so history survives restarts.
-    """
-
     def __init__(self, max_history: int = 10):
-        # defaultdict means we never get a KeyError for a new phone number
-        self._store: Dict[str, List[Dict]] = defaultdict(list)
         self.max_history = max_history
 
-    def add_message(self, phone: str, role: str, content: str):
-        """
-        role must be 'user' or 'assistant'.
-        Keeps only the last max_history messages per phone.
-        """
-        self._store[phone].append({"role": role, "content": content})
+    def _load(self) -> Dict:
+        if not HISTORY_FILE.exists():
+            return {}
+        with open(HISTORY_FILE) as f:
+            return json.load(f)
 
-        # Trim to max_history to avoid sending huge prompts to Gemini
-        if len(self._store[phone]) > self.max_history:
-            self._store[phone] = self._store[phone][-self.max_history:]
+    def _save(self, data: Dict):
+        HISTORY_FILE.parent.mkdir(exist_ok=True)
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def add_message(self, phone: str, role: str, content: str):
+        data = self._load()
+        if phone not in data:
+            data[phone] = []
+        data[phone].append({"role": role, "content": content})
+        # Keep only last max_history messages
+        data[phone] = data[phone][-self.max_history:]
+        self._save(data)
 
     def get_history(self, phone: str) -> List[Dict]:
-        return self._store[phone].copy()
+        data = self._load()
+        return data.get(phone, [])
 
     def clear(self, phone: str):
-        """Let users reset their conversation by sending 'reset'."""
-        self._store[phone] = []
+        data = self._load()
+        data[phone] = []
+        self._save(data)
