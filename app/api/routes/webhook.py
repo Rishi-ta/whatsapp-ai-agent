@@ -3,7 +3,7 @@ import re
 import os
 import httpx
 from pathlib import Path
-from fastapi import APIRouter, Form, Response, Request
+from fastapi import APIRouter, Form, Response, Request, BackgroundTasks
 from twilio.twiml.messaging_response import MessagingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -28,6 +28,10 @@ KEYWORD_PATTERN = re.compile(r"^(menu|join|connect)\s+([a-zA-Z0-9]+)$", re.IGNOR
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# Track phones currently having their PDF processed so we can give
+# a "still processing" reply instead of the confusing welcome prompt.
+_processing: set[str] = set()
+
 
 def _personal_collection(phone: str) -> str:
     """
@@ -43,6 +47,7 @@ def _personal_collection(phone: str) -> str:
 @limiter.limit("30/minute")
 async def whatsapp_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     From: str = Form(...),
     Body: str = Form(""),
     NumMedia: int = Form(0),
@@ -57,16 +62,17 @@ async def whatsapp_webhook(
     # ── Reset command ──────────────────────────────────────────
     if message.lower() in ("reset", "clear", "start over"):
         conversation_service.clear(phone)
-        return _twiml_reply("Conversation reset. Ask me anything!")
+        _processing.discard(phone)
+        return _twiml_reply("✅ Conversation reset. Send me a PDF or ask me anything!")
 
     # ── PDF sent directly on WhatsApp (Flow B) ─────────────────
     if NumMedia > 0 and MediaContentType0 == "application/pdf":
-        return await _handle_pdf_upload(phone, MediaUrl0)
+        return await _handle_pdf_upload(phone, MediaUrl0, background_tasks)
 
     # ── Non-PDF file sent ──────────────────────────────────────
     if NumMedia > 0 and MediaContentType0 != "application/pdf":
         return _twiml_reply(
-            "I can only process PDF files. "
+            "⚠️ I can only process *PDF* files.\n"
             "Please send a PDF document and I'll learn from it!"
         )
 
@@ -87,28 +93,42 @@ async def whatsapp_webhook(
             tenant_service.register_phone(found_tenant_id, phone)
             tenant = tenant_service.get_tenant(found_tenant_id)
             return _twiml_reply(
-                f"Connected to *{tenant['name']}*! 🎉\n\n"
+                f"✅ Connected to *{tenant['name']}*! 🎉\n\n"
                 f"Ask me anything about their products or services."
             )
         else:
             return _twiml_reply(
-                f"No business found with code '{keyword}'. "
+                f"❌ No business found with code *{keyword}*.\n"
                 f"Please check the code and try again."
             )
 
     # ── Flow B: personal collection ────────────────────────────
     collection_name = _personal_collection(phone)
 
-    # Check if they have any personal documents
-    vs = VectorStore(collection_name=collection_name)
-    if vs.collection.count() == 0:
+    # User texting while PDF is still being processed
+    if phone in _processing:
         return _twiml_reply(
-            "👋 Welcome to your Personal AI Assistant!\n\n"
-            "You have two options:\n\n"
-            "📄 *Upload your own PDF* — just send any PDF file here "
-            "and I'll learn from it. Then ask me anything about it.\n\n"
-            "🏢 *Connect to a business* — send:\n"
-            "menu <BUSINESS_CODE>\n\n"
+            "⏳ Your PDF is still being processed...\n\n"
+            "Please wait a moment and ask your question again once I confirm it's ready!"
+        )
+
+    # Check if they have any personal documents
+    try:
+        vs = VectorStore(collection_name=collection_name)
+        doc_count = vs.collection.count()
+    except Exception as e:
+        logger.error(f"Error checking collection for {phone}: {e}")
+        doc_count = 0
+
+    if doc_count == 0:
+        return _twiml_reply(
+            "👋 *Welcome to your Personal AI Assistant!*\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📄 *Upload a PDF*\n"
+            "Just send any PDF file here. I'll read it and you can ask me anything about it.\n\n"
+            "🏢 *Connect to a business*\n"
+            "Send: `menu <BUSINESS_CODE>`\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
             "What would you like to do?"
         )
 
@@ -116,81 +136,126 @@ async def whatsapp_webhook(
     return await _rag_reply(phone, message, collection_name)
 
 
-async def _handle_pdf_upload(phone: str, media_url: str) -> Response:
+async def _handle_pdf_upload(
+    phone: str, media_url: str, background_tasks: BackgroundTasks
+) -> Response:
     """
-    Downloads a PDF sent on WhatsApp and ingests it into
-    the user's personal ChromaDB collection.
+    Immediately reply to the user, then kick off ingestion as a
+    FastAPI BackgroundTask (which is the correct way to run async
+    work after a response has been sent).
     """
-    try:
-        return _twiml_reply(
-            "📄 Got your PDF! Processing it now...\n"
-            "This takes 20-30 seconds. I'll be ready to answer "
-            "questions about it right after."
-        )
-    finally:
-        # Process in background after replying
-        import asyncio
-        asyncio.create_task(
-            _ingest_whatsapp_pdf(phone, media_url)
-        )
+    logger.info(f"PDF upload request from {phone}, url={media_url}")
+
+    # Mark this phone as "processing" so follow-up texts get a
+    # friendly wait message instead of the welcome prompt.
+    _processing.add(phone)
+
+    # Schedule background ingestion using FastAPI's BackgroundTasks —
+    # this is reliable, unlike asyncio.create_task() inside a finally block.
+    background_tasks.add_task(_ingest_whatsapp_pdf, phone, media_url)
+
+    return _twiml_reply(
+        "📄 *Got your PDF! Processing it now...*\n\n"
+        "This usually takes 20–30 seconds.\n"
+        "I'll send you a message as soon as it's ready — then you can ask me anything! 🚀"
+    )
 
 
 async def _ingest_whatsapp_pdf(phone: str, media_url: str):
     """Background task: download and ingest a WhatsApp PDF."""
+
+    logger.info("========== PDF INGESTION STARTED ==========")
+    logger.info(f"Phone: {phone}")
+    logger.info(f"Media URL: {media_url}")
+
     file_path = UPLOAD_DIR / f"{re.sub(r'[^0-9]', '', phone)}_upload.pdf"
 
     try:
-        # Download PDF from Twilio's media URL
-        # Twilio requires auth to download media
         auth = (settings.twilio_account_sid, settings.twilio_auth_token)
 
+        logger.info("Downloading PDF from Twilio...")
+
         async with httpx.AsyncClient() as client:
-            response = await client.get(media_url, auth=auth, timeout=30)
+            response = await client.get(media_url, auth=auth, timeout=60)
             response.raise_for_status()
+
+        logger.info(f"PDF downloaded. Size={len(response.content)} bytes")
 
         with open(file_path, "wb") as f:
             f.write(response.content)
 
-        # Ingest into personal collection
+        logger.info(f"PDF saved to: {file_path}")
+
+        # Load PDF
         docs = PDFService().load(str(file_path))
-        chunks = ChunkingService(
+        logger.info(f"Pages extracted: {len(docs)}")
+
+        # Chunk PDF
+        chunker = ChunkingService(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
-        ).split(docs)
+        )
+        chunks = chunker.split(docs)
+        logger.info(f"Chunks created: {len(chunks)}")
 
+        # Collection name for this user
         collection_name = _personal_collection(phone)
+        logger.info(f"Collection name: {collection_name}")
+
+        # Store in Chroma
         vs = VectorStore(collection_name=collection_name)
+        logger.info(f"Collection count BEFORE insert: {vs.collection.count()}")
+
         stored = vs.add_documents(chunks)
+        logger.info(f"Stored chunks: {stored}")
+        logger.info(f"Collection count AFTER insert: {vs.collection.count()}")
 
-        logger.info(f"Personal PDF ingested for {phone}: {stored} chunks")
+        logger.info(f"Personal PDF ingested successfully for {phone}")
 
-        # Send follow-up message confirming it's ready
+        # Send WhatsApp confirmation
+        _send_whatsapp_message(
+            phone,
+            f"✅ *Done! Your PDF is ready.*\n\n"
+            f"📊 Pages: {len(docs)} | Chunks: {stored}\n\n"
+            f"Go ahead — ask me anything about it! 💬",
+        )
+
+        logger.info("Confirmation WhatsApp message sent")
+
+    except Exception as e:
+        logger.exception(f"PDF ingestion FAILED for {phone}: {e}")
+        _send_whatsapp_message(
+            phone,
+            "❌ *Sorry, I couldn't process that PDF.*\n\n"
+            "Possible reasons:\n"
+            "• The file is password-protected\n"
+            "• The PDF contains only scanned images (no text)\n"
+            "• The file is corrupted\n\n"
+            "Please try a different PDF file.",
+        )
+
+    finally:
+        # Always remove from processing set so future messages work correctly
+        _processing.discard(phone)
+
+        if file_path.exists():
+            file_path.unlink()
+            logger.info(f"Deleted temporary file: {file_path}")
+
+
+def _send_whatsapp_message(phone: str, body: str):
+    """Send a proactive WhatsApp message via Twilio REST API."""
+    try:
         from twilio.rest import Client
+
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
         client.messages.create(
             from_=settings.twilio_whatsapp_number,
             to=phone,
-            body=(
-                f"✅ Done! I've read your PDF ({len(docs)} pages, {stored} chunks).\n\n"
-                f"Ask me anything about it!"
-            ),
+            body=body,
         )
-
     except Exception as e:
-        logger.error(f"PDF ingestion failed for {phone}: {e}")
-        try:
-            from twilio.rest import Client
-            client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-            client.messages.create(
-                from_=settings.twilio_whatsapp_number,
-                to=phone,
-                body="❌ Sorry, I couldn't process that PDF. Please try a smaller file (under 5MB).",
-            )
-        except Exception:
-            pass
-    finally:
-        if file_path.exists():
-            file_path.unlink()
+        logger.exception(f"Failed to send WhatsApp message to {phone}: {e}")
 
 
 async def _rag_reply(phone: str, message: str, collection_name: str) -> Response:
@@ -204,7 +269,7 @@ async def _rag_reply(phone: str, message: str, collection_name: str) -> Response
         reply = _format_whatsapp_reply(answer, source_chunks)
     except Exception as e:
         logger.error(f"RAG error for {phone}: {e}")
-        reply = "Sorry, I ran into an issue. Please try again in a moment."
+        reply = "⚠️ Sorry, I ran into an issue. Please try again in a moment."
 
     conversation_service.add_message(phone, "user", message)
     conversation_service.add_message(phone, "assistant", reply)
